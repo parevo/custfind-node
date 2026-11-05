@@ -1,0 +1,41 @@
+{
+  "name": "@custfind/node",
+  "version": "1.0.0",
+  "description": "Official Node.js client for the Custfind API: lead searches, email outreach, CRM and webhooks.",
+  "license": "MIT",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "npm run build && tsc -p tsconfig.test.json && node --test build-test/test/*.test.js"
+  },
+  "keywords": [
+    "custfind",
+    "leads",
+    "lead-generation",
+    "api",
+    "sdk"
+  ],
+  "homepage": "https://custfind.com/developers",
+  "publishConfig": {
+    "access": "public"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "typescript": "^5.4.0"
+  }
+}
