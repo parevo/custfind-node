@@ -4,6 +4,8 @@
 # Publishes with npm trusted publishing (no token): on npmjs.com, the
 # @custfind/node package → Settings → Trusted publisher → GitHub Actions,
 # repository parevo/custfind-node, workflow release.yml, environment npm.
+# The package must exist for that, so its first version may be published by
+# hand; a version already on npm is skipped here, and the release still made.
 name: Release
 
 on:
@@ -24,10 +26,19 @@ jobs:
         with:
           node-version: 24
           registry-url: https://registry.npmjs.org
+      # Trusted publishing needs npm 11.5.1+.
+      - run: npm install -g npm@^11.5.1 && npm --version
       - run: npm install --no-audit --no-fund && npm test
       - name: Tag matches package.json
         run: test "v$(jq -r .version package.json)" = "$GITHUB_REF_NAME"
-      - run: npm publish --access public --provenance
+      - name: Publish unless this version is on npm
+        run: |
+          name=$(jq -r .name package.json); version=$(jq -r .version package.json)
+          if npm view "$name@$version" version >/dev/null 2>&1; then
+            echo "$name@$version is already on npm; skipping publish"
+          else
+            npm publish --access public --provenance
+          fi
       - run: gh release create "$GITHUB_REF_NAME" --generate-notes --verify-tag
         env:
           GH_TOKEN: ${{ github.token }}
