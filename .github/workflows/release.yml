@@ -1,0 +1,33 @@
+# Runs in the public mirror parevo/custfind-node. Edit it in the main repo
+# (sdks/node/.github); changes made here are overwritten.
+#
+# Publishes with npm trusted publishing (no token): on npmjs.com, the
+# @custfind/node package → Settings → Trusted publisher → GitHub Actions,
+# repository parevo/custfind-node, workflow release.yml, environment npm.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: npm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+      - run: npm install --no-audit --no-fund && npm test
+      - name: Tag matches package.json
+        run: test "v$(jq -r .version package.json)" = "$GITHUB_REF_NAME"
+      - run: npm publish --access public --provenance
+      - run: gh release create "$GITHUB_REF_NAME" --generate-notes --verify-tag
+        env:
+          GH_TOKEN: ${{ github.token }}

@@ -1,6 +1,6 @@
 {
   "name": "@custfind/node",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Official Node.js client for the Custfind API: lead searches, email outreach, CRM and webhooks.",
   "license": "MIT",
   "type": "module",
@@ -21,7 +21,8 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "test": "npm run build && tsc -p tsconfig.test.json && node --test build-test/test/*.test.js"
+    "test": "npm run build && tsc -p tsconfig.test.json && node --test build-test/test/*.test.js",
+    "prepublishOnly": "npm run build"
   },
   "keywords": [
     "custfind",
@@ -37,5 +38,12 @@
   "devDependencies": {
     "@types/node": "^20.11.0",
     "typescript": "^5.4.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/parevo/custfind-node.git"
+  },
+  "bugs": {
+    "url": "https://github.com/parevo/custfind-node/issues"
   }
 }
