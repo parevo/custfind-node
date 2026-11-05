@@ -6,10 +6,13 @@ import type {
   Customer,
   Deal,
   Lead,
+  LeadCRM,
+  LeadDetail,
   LeadListParams,
   Note,
   OutreachListParams,
   OutreachMessage,
+  OutreachPage,
   Page,
   Pipeline,
   Search,
@@ -27,7 +30,7 @@ export interface CustfindOptions {
   baseUrl?: string;
   /** Per-attempt timeout. Default 30 s. */
   timeoutMs?: number;
-  /** Retries after a network error, 409, 429 or 5xx. Default 3. */
+  /** Retries after a network error, 429, 5xx or a write still in progress. Default 3. */
   maxRetries?: number;
   /** Override fetch (tests, proxies). */
   fetch?: typeof fetch;
@@ -43,6 +46,7 @@ export interface RequestOptions {
 }
 
 const DEFAULT_BASE = "https://api.custfind.com";
+const VERSION = "1.1.0";
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const enc = encodeURIComponent;
 
@@ -110,7 +114,7 @@ export class Custfind {
     const headers: Record<string, string> = {
       Authorization: `Bearer ${this.apiKey}`,
       Accept: "application/json",
-      "User-Agent": "custfind-node/1.0.0",
+      "User-Agent": `custfind-node/${VERSION}`,
     };
     let body: string | undefined;
     if (opts.body !== undefined) {
@@ -120,11 +124,12 @@ export class Custfind {
     if (method !== "GET") headers["Idempotency-Key"] = opts.idempotencyKey ?? randomUUID();
 
     for (let attempt = 0; ; attempt++) {
-      const signal = opts.signal ? AbortSignal.any([opts.signal, AbortSignal.timeout(this.timeoutMs)]) : AbortSignal.timeout(this.timeoutMs);
+      const { signal, done } = attemptSignal(this.timeoutMs, opts.signal);
       let res: Response;
       try {
         res = await this.fetchImpl(url, { method, headers, body, signal });
       } catch (err) {
+        done();
         if (opts.signal?.aborted) throw err;
         if (attempt < this.maxRetries) {
           await sleep(backoff(attempt));
@@ -132,28 +137,57 @@ export class Custfind {
         }
         throw new CustfindError(0, err instanceof Error ? err.message : "network_error");
       }
-      if (res.ok) {
-        if (res.status === 204) return undefined as T;
-        const text = await res.text();
-        return (text ? JSON.parse(text) : undefined) as T;
+      let text: string;
+      try {
+        text = await res.text();
+      } finally {
+        done();
       }
-      const retryAfter = Number(res.headers.get("Retry-After")) || undefined;
-      const retryable = res.status === 409 || res.status === 429 || res.status >= 500;
+      if (res.ok) {
+        return (res.status === 204 || !text ? undefined : JSON.parse(text)) as T;
+      }
+      const header = res.headers.get("Retry-After");
+      const retryAfter = header !== null && header.trim() !== "" && Number.isFinite(Number(header)) ? Number(header) : undefined;
+      let code = `http_${res.status}`;
+      let detail: string | undefined;
+      try {
+        const data = JSON.parse(text) as { error?: string; detail?: string };
+        if (data?.error) code = data.error;
+        detail = data?.detail;
+      } catch {
+        // A few routes answer in plain text ("invalid json body").
+        detail = text.trim() || undefined;
+      }
+      // A 409 is retried only while an earlier attempt of the same write is
+      // still running; any other 409 ("invalid job state") is final, and a
+      // retry would only get it replayed.
+      const retryable = res.status === 429 || res.status >= 500 || (res.status === 409 && code === "idempotency_in_progress");
       if (retryable && attempt < this.maxRetries) {
-        await res.body?.cancel();
-        await sleep(retryAfter ? retryAfter * 1000 : backoff(attempt));
+        await sleep(retryAfter !== undefined ? retryAfter * 1000 : backoff(attempt));
         continue;
       }
-      let code = `http_${res.status}`;
-      try {
-        const data = (await res.json()) as { error?: string };
-        if (data?.error) code = data.error;
-      } catch {
-        /* not JSON */
-      }
-      throw new CustfindError(res.status, code, undefined, retryAfter);
+      throw new CustfindError(res.status, code, detail ? `Custfind API error ${res.status}: ${code} (${detail})` : undefined, retryAfter);
     }
   }
+}
+
+/**
+ * A per-attempt signal: aborts on the caller's signal or after timeoutMs.
+ * (AbortSignal.any needs Node 20.3; this works on 18.)
+ */
+function attemptSignal(timeoutMs: number, outer?: AbortSignal): { signal: AbortSignal; done: () => void } {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(new DOMException("The operation timed out.", "TimeoutError")), timeoutMs);
+  const onAbort = () => ctrl.abort(outer?.reason);
+  if (outer?.aborted) ctrl.abort(outer.reason);
+  else outer?.addEventListener("abort", onAbort, { once: true });
+  return {
+    signal: ctrl.signal,
+    done: () => {
+      clearTimeout(timer);
+      outer?.removeEventListener("abort", onAbort);
+    },
+  };
 }
 
 function backoff(attempt: number): number {
@@ -178,8 +212,9 @@ export class Searches extends Resource {
   cancel(id: string, opts?: RequestOptions): Promise<Search> {
     return this.client.request("POST", `/v1/searches/${enc(id)}/cancel`, opts);
   }
-  leads(id: string, params: { page?: number; page_size?: number } = {}): Promise<Page<Lead>> {
-    return this.client.request("GET", `/v1/searches/${enc(id)}/leads`, { query: params });
+  /** One page of a search's leads; takes the same filters as `leads.list`. */
+  leads(id: string, params: Omit<LeadListParams, "job_id"> = {}): Promise<Page<Lead>> {
+    return this.client.request("GET", `/v1/searches/${enc(id)}/leads`, { query: params as Query });
   }
   /** Polls until the search completes, fails or is cancelled. */
   async waitForCompletion(id: string, opts: { intervalMs?: number; timeoutMs?: number } = {}): Promise<Search> {
@@ -192,13 +227,11 @@ export class Searches extends Resource {
       await sleep(interval);
     }
   }
-  /** Every lead of a search, page by page. */
-  async *allLeads(id: string, pageSize = 100): AsyncGenerator<Lead> {
-    for (let page = 1; ; page++) {
-      const res = await this.leads(id, { page, page_size: pageSize });
-      for (const lead of res.items ?? []) yield lead;
-      if (page * pageSize >= res.total || (res.items ?? []).length === 0) return;
-    }
+  /** Every lead of a search, page by page. Iterate a finished search: while one runs, new leads can shift the pages. */
+  allLeads(id: string, params: Omit<LeadListParams, "job_id" | "page"> | number = {}): AsyncGenerator<Lead> {
+    // A number is the page size (the 1.0 signature).
+    const p = typeof params === "number" ? { page_size: params } : params;
+    return paginate((q) => this.leads(id, q), p);
   }
 }
 
@@ -206,7 +239,12 @@ export class Leads extends Resource {
   list(params: LeadListParams = {}): Promise<Page<Lead>> {
     return this.client.request("GET", "/v1/leads", { query: params as Query });
   }
-  get(id: string): Promise<{ lead: Lead; enrichment?: Record<string, unknown> }> {
+  /** Every lead matching the filters, page by page. */
+  all(params: Omit<LeadListParams, "page"> = {}): AsyncGenerator<Lead> {
+    return paginate((p) => this.list(p), params);
+  }
+  /** A lead with its enrichment, emails and calls. */
+  get(id: string): Promise<LeadDetail> {
     return this.client.request("GET", `/v1/leads/${enc(id)}`);
   }
   outreach(id: string): Promise<OutreachMessage[]> {
@@ -216,7 +254,8 @@ export class Leads extends Resource {
   writeDraft(id: string, params: { regenerate?: boolean } = {}, opts?: RequestOptions): Promise<OutreachMessage[]> {
     return this.client.request("POST", `/v1/leads/${enc(id)}/outreach`, { body: params, ...opts });
   }
-  crm(id: string): Promise<Record<string, unknown>> {
+  /** The lead's deal, notes, tasks, tags, emails and meetings. */
+  crm(id: string): Promise<LeadCRM> {
     return this.client.request("GET", `/v1/leads/${enc(id)}/crm`);
   }
   addNote(id: string, body: string, opts?: RequestOptions): Promise<Note> {
@@ -225,7 +264,7 @@ export class Leads extends Resource {
 }
 
 export class Outreach extends Resource {
-  list(params: OutreachListParams = {}): Promise<Page<OutreachMessage>> {
+  list(params: OutreachListParams = {}): Promise<OutreachPage> {
     return this.client.request("GET", "/v1/outreach", { query: params as Query });
   }
   get(id: string): Promise<OutreachMessage> {
@@ -236,11 +275,13 @@ export class Outreach extends Resource {
   }
   /** Rewrites with AI by tone or instruction; one AI edit, refunded on failure. */
   rewrite(id: string, params: { tone?: "professional" | "short" | "casual"; instruction?: string }, opts?: RequestOptions): Promise<OutreachMessage> {
+    if (!params.tone && !params.instruction) return Promise.reject(new Error("Custfind: rewrite needs a tone or an instruction"));
     return this.client.request("POST", `/v1/outreach/${enc(id)}/rewrite`, { body: params, ...opts });
   }
-  /** Sends now, or at `scheduled_at` (RFC 3339). */
-  send(id: string, params: { scheduled_at?: string } = {}, opts?: RequestOptions): Promise<OutreachMessage> {
-    return this.client.request("POST", `/v1/outreach/${enc(id)}/send`, { body: params, ...opts });
+  /** Sends now, or at `scheduled_at` (a Date or RFC 3339). */
+  send(id: string, params: { scheduled_at?: string | Date } = {}, opts?: RequestOptions): Promise<OutreachMessage> {
+    const at = params.scheduled_at instanceof Date ? params.scheduled_at.toISOString().replace(/\.\d{3}Z$/, "Z") : params.scheduled_at;
+    return this.client.request("POST", `/v1/outreach/${enc(id)}/send`, { body: at ? { scheduled_at: at } : {}, ...opts });
   }
 }
 
@@ -251,10 +292,15 @@ export class Pipelines extends Resource {
 }
 
 export class Deals extends Resource {
-  create(params: { lead_id: string; stage_id?: string; title?: string; value_cents?: number; currency?: string }, opts?: RequestOptions): Promise<Deal> {
+  /** Opens a deal for a lead; without stage_id it starts in the default pipeline's first stage. */
+  create(params: { lead_id: string; stage_id?: string; title?: string; value_cents?: number; currency?: string; assigned_user_id?: string }, opts?: RequestOptions): Promise<Deal> {
     return this.client.request("POST", "/v1/deals", { body: params, ...opts });
   }
-  update(id: string, params: { stage_id?: string; pipeline_id?: string; title?: string; value_cents?: number; currency?: string }, opts?: RequestOptions): Promise<Deal> {
+  update(
+    id: string,
+    params: { stage_id?: string; pipeline_id?: string; title?: string; value_cents?: number; currency?: string; assigned_user_id?: string },
+    opts?: RequestOptions,
+  ): Promise<Deal> {
     return this.client.request("PATCH", `/v1/deals/${enc(id)}`, { body: params, ...opts });
   }
 }
@@ -309,5 +355,15 @@ export class SenderAccounts extends Resource {
   }
   delete(id: string, opts?: RequestOptions): Promise<void> {
     return this.client.request("DELETE", `/v1/sender-accounts/${enc(id)}`, opts);
+  }
+}
+
+async function* paginate<P extends { page?: number; page_size?: number }>(fetchPage: (p: P) => Promise<Page<Lead>>, params: P): AsyncGenerator<Lead> {
+  const pageSize = params.page_size ?? 100;
+  for (let page = 1; ; page++) {
+    const res = await fetchPage({ ...params, page, page_size: pageSize });
+    const items = res.items ?? [];
+    for (const lead of items) yield lead;
+    if (items.length === 0 || page * pageSize >= res.total) return;
   }
 }

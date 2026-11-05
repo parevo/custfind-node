@@ -5,14 +5,16 @@ import type { WebhookEvent } from "./types.js";
 /**
  * Verifies a webhook delivery and returns its event. Pass the raw request
  * body exactly as received (a string or Buffer, before JSON parsing), the
- * Custfind-Signature header and your endpoint's whsec_ secret.
+ * Custfind-Signature header and your endpoint's whsec_ secret. Narrow the
+ * result on `type` for typed `data`. Deliveries can repeat: use `id` to
+ * handle each event once.
  */
-export function verifyWebhook<T = Record<string, unknown>>(
+export function verifyWebhook(
   rawBody: string | Uint8Array,
   signatureHeader: string | null | undefined,
   secret: string,
   toleranceSeconds = 300,
-): WebhookEvent<T> {
+): WebhookEvent {
   const body = typeof rawBody === "string" ? rawBody : Buffer.from(rawBody).toString("utf8");
   let timestamp = 0;
   const signatures: string[] = [];
@@ -29,5 +31,5 @@ export function verifyWebhook<T = Record<string, unknown>>(
     return got.length === expected.length && timingSafeEqual(got, expected);
   });
   if (!ok) throw new WebhookVerificationError("signature mismatch");
-  return JSON.parse(body) as WebhookEvent<T>;
+  return JSON.parse(body) as WebhookEvent;
 }

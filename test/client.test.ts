@@ -96,3 +96,59 @@ test("verifyWebhook accepts a valid signature and rejects tampering", () => {
   assert.throws(() => verifyWebhook(body, `t=${t - 3600},v1=${sig}`, secret), WebhookVerificationError);
   assert.throws(() => verifyWebhook(body, "garbage", secret), WebhookVerificationError);
 });
+
+test("retries a write still in progress, but not a final 409", async () => {
+  const s = await server((_r, n) =>
+    n === 1 ? { status: 409, body: { error: "idempotency_in_progress" }, headers: { "Retry-After": "0" } } : n === 2 ? { status: 200, body: { id: "j" } } : { status: 409, body: { error: "invalid job state" } },
+  );
+  const cf = new Custfind({ apiKey: "k", baseUrl: s.url });
+  assert.equal((await cf.searches.cancel("j")).id, "j");
+  assert.equal(s.seen.length, 2);
+  assert.equal(s.seen[0].headers["idempotency-key"], s.seen[1].headers["idempotency-key"]);
+  await assert.rejects(cf.searches.cancel("j"), (err: unknown) => err instanceof CustfindError && err.status === 409 && err.code === "invalid job state");
+  assert.equal(s.seen.length, 3, "a final 409 is not retried");
+  await s.close();
+});
+
+test("keeps the text of a plain-text error", async () => {
+  const s = await server(() => ({ status: 400 }));
+  const cf = new Custfind({
+    apiKey: "k",
+    baseUrl: s.url,
+    fetch: async () => new Response("invalid json body\n", { status: 400, headers: { "Content-Type": "text/plain" } }),
+  });
+  await assert.rejects(cf.deals.create({ lead_id: "l" }), (err: unknown) => err instanceof CustfindError && err.code === "http_400" && err.message.includes("invalid json body"));
+  await s.close();
+});
+
+test("search leads take filters and allLeads pages through them", async () => {
+  const s = await server((_r, n) => ({ status: 200, body: n === 1 ? { items: [{ id: "a" }, { id: "b" }], total: 3, page: 1, page_size: 2 } : { items: [{ id: "c" }], total: 3, page: 2, page_size: 2 } }));
+  const cf = new Custfind({ apiKey: "k", baseUrl: s.url });
+  const ids: string[] = [];
+  for await (const lead of cf.searches.allLeads("j1", { page_size: 2, min_score: 60, sort: "score_desc" })) ids.push(lead.id);
+  assert.deepEqual(ids, ["a", "b", "c"]);
+  assert.equal(s.seen[0].url, "/v1/searches/j1/leads?page_size=2&min_score=60&sort=score_desc&page=1");
+  assert.equal(s.seen[1].url, "/v1/searches/j1/leads?page_size=2&min_score=60&sort=score_desc&page=2");
+  await s.close();
+});
+
+test("send takes a Date and an aborted signal stops the call", async () => {
+  const s = await server(() => ({ status: 202, body: { id: "m" } }));
+  const cf = new Custfind({ apiKey: "k", baseUrl: s.url });
+  await cf.outreach.send("m", { scheduled_at: new Date(Date.UTC(2026, 2, 1, 6)) });
+  assert.equal(s.seen[0].body, '{"scheduled_at":"2026-03-01T06:00:00Z"}');
+  const ctrl = new AbortController();
+  ctrl.abort();
+  await assert.rejects(cf.request("GET", "/v1/me", { signal: ctrl.signal }));
+  assert.equal(s.seen.length, 1, "an aborted call is not retried");
+  await s.close();
+});
+
+test("verifyWebhook accepts a signature made by the API", () => {
+  // Signed by the API's shared.WebhookSignatureValue.
+  const body = '{"id":"evt_1","type":"search.completed","created_at":"2023-11-14T22:13:20Z","organization_id":"org_1","data":{"id":"job_1","status":"completed","leads_found":12}}';
+  const header = "t=1700000000,v1=09714fde5144a52b4b8218ce4fbd186b9cb1fce94a75f5396bfbc54f6fbee486";
+  const event = verifyWebhook(body, header, "whsec_test", Infinity);
+  assert.equal(event.type, "search.completed");
+  if (event.type === "search.completed") assert.equal(event.data.leads_found, 12);
+});
