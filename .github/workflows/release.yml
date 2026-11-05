@@ -2,7 +2,7 @@
 # (sdks/node/.github); changes made here are overwritten.
 #
 # Publishes with npm trusted publishing (no token): on npmjs.com, the
-# @custfind/node package → Settings → Trusted publisher → GitHub Actions,
+# @parevo/custfind package → Settings → Trusted publisher → GitHub Actions,
 # repository parevo/custfind-node, workflow release.yml, environment npm.
 # The package must exist for that, so its first version may be published by
 # hand; a version already on npm is skipped here, and the release still made.

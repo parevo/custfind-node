@@ -1,5 +1,5 @@
 {
-  "name": "@custfind/node",
+  "name": "@parevo/custfind",
   "version": "1.1.0",
   "description": "Official Node.js client for the Custfind API: lead searches, email outreach, CRM and webhooks.",
   "license": "MIT",

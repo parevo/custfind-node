@@ -1,13 +1,13 @@
-# @custfind/node
+# @parevo/custfind
 
 Official Node.js client for the [Custfind API](https://custfind.com/developers): start lead searches, read scored leads, write and send emails, move deals and receive webhooks. No dependencies; Node 18+.
 
 ```bash
-npm install @custfind/node
+npm install @parevo/custfind
 ```
 
 ```js
-import { Custfind } from "@custfind/node";
+import { Custfind } from "@parevo/custfind";
 
 const cf = new Custfind({ apiKey: process.env.CUSTFIND_API_KEY });
 
@@ -40,7 +40,7 @@ Failed calls throw `CustfindError` with `status` and the API's `code` (`api_requ
 
 ```js
 import express from "express";
-import { verifyWebhook } from "@custfind/node";
+import { verifyWebhook } from "@parevo/custfind";
 
 app.post("/webhooks/custfind", express.raw({ type: "application/json" }), (req, res) => {
   try {
@@ -71,4 +71,4 @@ npm install && npm test
 
 ## Changelog
 
-- **1.1.0** — Only `409 idempotency_in_progress` is retried (a final 409 used to be retried until it gave up). Works on Node 18 (no `AbortSignal.any`). Typed webhook events per `type` (`verifyWebhook` is no longer generic). `searches.leads`/`allLeads` take every lead filter; new `leads.all`; `leads.get` returns enrichment, emails and calls; `leads.crm` and `outreach.list` (with `stats`) are typed; `seller_profile_id` on searches, `assigned_user_id` on deals; `outreach.send` takes a `Date`; plain-text error bodies are kept in the message.
+- **1.1.0** — Published as `@parevo/custfind` (the `@custfind` npm scope is not ours). Only `409 idempotency_in_progress` is retried (a final 409 used to be retried until it gave up). Works on Node 18 (no `AbortSignal.any`). Typed webhook events per `type` (`verifyWebhook` is no longer generic). `searches.leads`/`allLeads` take every lead filter; new `leads.all`; `leads.get` returns enrichment, emails and calls; `leads.crm` and `outreach.list` (with `stats`) are typed; `seller_profile_id` on searches, `assigned_user_id` on deals; `outreach.send` takes a `Date`; plain-text error bodies are kept in the message.
